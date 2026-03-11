@@ -1,0 +1,4 @@
+atmosphere,name,n_flares,obs_window_days,cumul_dO3,cumul_dCH4,cumul_dN2O,cumul_dNO2,cumul_dHNO3,cumul_dOH,cumul_dCO,cumul_dSO2,cumul_dO3_abiotic,cumul_dO2_abiotic,cumul_dno_chemistry_note
+A,N₂-dominated (Earth-like),47,67.41884278818512,-0.12665812301537732,-0.025100118111321512,0.002295256347800506,0.007943969247687617,0.010494913629999176,0.07934509988877031,,,,,
+B,CO₂-dominated (Venus-analog),47,67.41884278818512,,,,,,,0.0019814315469014977,-0.00037292292817943997,7.943978129302239e-10,1.2661816402663996e-06,
+C,Thin remnant / bare rock,47,67.41884278818512,,,,,,,,,,,0.0

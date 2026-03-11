@@ -1,0 +1,4 @@
+atmosphere,name,P_bar,T_K,jwst_status,biosignatures,false_positives,uv_shield,vmr_N2,vmr_O2,vmr_CO2,vmr_CH4,vmr_O3,vmr_N2O,vmr_H2O,vmr_CO,vmr_SO2,vmr_NO2,vmr_HNO3
+A,N₂-dominated (Earth-like),1.0,270.0,Permitted (Espinoza+2025),"O3,CH4,N2O",,Strong (O3 column ~300 DU equivalent),0.79,0.2095,0.00042,1.8e-06,3e-07,3.2e-07,0.01,0.0,0.0,5e-10,3e-10
+B,CO₂-dominated (Venus-analog),10.0,380.0,Disfavoured (Espinoza+2025),,"O3,O2",Minimal (no O3 column; H2SO4 clouds provide some NUV absorption),0.035,5e-07,0.96,0.0,1e-10,0.0,1e-05,2e-05,0.00015,0.0,0.0
+C,Thin remnant / bare rock,0.01,250.0,"Possible (many TRAPPIST-1b,c,d siblings are airless)",,,None — UV reaches surface nearly unattenuated,0.98,0.0,0.02,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
