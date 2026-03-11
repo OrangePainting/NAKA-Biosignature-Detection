@@ -7,7 +7,7 @@
 
 This project is a four-stage computational pipeline that models how **stellar flares from TRAPPIST-1** interfere with the detection of biosignatures on its planet **TRAPPIST-1e**. The pipeline progresses from real observational data through atmospheric chemistry, synthetic spectra, and finally comparison against JWST observations.
 
-**Target system:** TRAPPIST-1 (TIC 267519185), an M8V ultra-cool dwarf 12.43 pc away, hosting TRAPPIST-1e — a rocky planet in the habitable zone with radius 0.92 R⊕ and mass 0.69 M⊕.
+**Target system:** TRAPPIST-1 (TIC 267519185), an M8V ultra-cool dwarf 12.43 pc away, hosting TRAPPIST-1e — a rocky planet in the habitable zone with radius 0.92 Earth Radius and mass 0.69 Earth's Mass.
 
 **Core scientific question:** When TRAPPIST-1 flares, the star temporarily becomes hundreds to millions of times brighter in the ultraviolet. Does this UV burst destroy the atmospheric biosignatures (O₃, CH₄, N₂O) we might detect with JWST, or might it actually *enhance* them? And does the real JWST DREAMS spectrum already constrain which atmospheric scenario is correct?
 
@@ -235,8 +235,8 @@ where:
 ```
 
 Key planetary parameters:
-- R_p = 0.920 R⊕ = 5.861×10⁸ cm
-- R_star = 0.1192 R☉ = 8.295×10⁹ cm
+- R_p = 0.920 Earth Radius = 5.861×10⁸ cm
+- R_star = 0.1192 * Our Sun's Radius = 8.295×10⁹ cm
 - Surface gravity g = 803 cm/s²
 - Continuum transit depth (no atmosphere): ~4,996 ppm
 
