@@ -132,7 +132,7 @@ UV energy fractions calibrated from M-dwarf flare spectroscopy (Kowalski et al. 
 - FUV (100–200 nm): 0.2% of bolometric flare energy
 
 #### Section 3 — Photochemical Lookup Tables
-Instead of running a full photochemical model (VULCAN, ATMO) live, the code interpolates from peer-reviewed results. This "hackathon shortcut" is grounded in published literature:
+Instead of running a full photochemical model (VULCAN, ATMO) live, the code interpolates from peer-reviewed results. This is seen in published literature:
 
 | Source | Key result used |
 |---|---|
