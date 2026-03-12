@@ -131,3 +131,4 @@ NAKA-Biosignature-Detection/
 
 - [PIPELINE_GUIDE.md](PIPELINE_GUIDE.md) — Full explanation of every stage, every dashboard tab, and the digital twin architecture
 - [SOURCES.md](SOURCES.md) — All scientific literature and data sources, with specific usage notes
+- We used Claude, a Generative LLM, to help us code this project.
