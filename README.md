@@ -1,6 +1,18 @@
-# NAKA Biosignature Detection — TRAPPIST-1e Digital Twin
+<h1 align="center"> NAKA Biosignature Detection — TRAPPIST-1e Digital Twin
+<img width="500"  alt="image" src="https://github.com/user-attachments/assets/e5c58ba4-a620-4ed8-9988-6fecbdea0ba5" /> <img width="500" alt="image" src="https://github.com/user-attachments/assets/4a854973-522a-4acf-8115-9053911ff09d" />
 
-A digital twin pipeline for modelling stellar flare interference with biosignature detection on TRAPPIST-1e, built for the HACK-4-SAGES hackathon.
+## Table of Contents:
+- [About](#about)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Running the Pipeline](#running-the-pipeline)
+- [Notes](#notes)
+- [Pipeline Guide](PIPELINE_GUIDE.md)
+- [Sources](SOURCES.md)
+
+## About
+
+NAKA is a digital twin pipeline for modelling stellar flare interference with biosignature detection on TRAPPIST-1e, built for the HACK-4-SAGES hackathon.
 
 The system ingests real TESS observational data, simulates UV-driven atmospheric photochemistry across three candidate atmospheres, models a living biosphere's response to flare events, generates synthetic JWST transmission spectra, and provides an interactive Streamlit dashboard for exploring the results.
 
