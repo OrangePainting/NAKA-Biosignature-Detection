@@ -88,6 +88,17 @@ def load_all_data():
     d['spectra']= pd.read_csv(f"{STAGE3}/all_spectra_combined.csv")
     d['feats']  = pd.read_csv(f"{STAGE3}/feature_amplitudes.csv")
 
+    # Stage 3 — Biosphere spectra (Eager-Nash+2024); optional (may not exist yet)
+    for key, fname in [('bio_on',  'spectrum_atmA_biosphere_on.csv'),
+                       ('bio_off', 'spectrum_atmA_biosphere_off.csv'),
+                       ('bio_diff','biosphere_spectral_diff.csv')]:
+        path = f"{STAGE3}/{fname}"
+        d[key] = pd.read_csv(path) if os.path.exists(path) else None
+
+    # Stage 2 — biosphere state (optional)
+    bio_path = f"{STAGE2}/biosphere_state.csv"
+    d['biosphere_ts'] = pd.read_csv(bio_path) if os.path.exists(bio_path) else None
+
     return d
 
 
@@ -456,6 +467,363 @@ def generate_static_summary(data, jwst_df, calib_df):
 
 
 # ===========================================================================
+# DIGITAL TWIN: STATE LOADER + NEW TAB RENDERERS
+# ===========================================================================
+
+def load_twin_state_cached():
+    """Load twin_state.json with a short TTL so the dashboard stays fresh."""
+    try:
+        from twin_core import load_twin_state
+        return load_twin_state()
+    except Exception:
+        return {}
+
+
+def render_twin_state_monitor(state, data):
+    """Tab: Twin State Monitor — live atmospheric and biosphere readout."""
+    st.subheader("TRAPPIST-1e Digital Twin — Live Atmospheric State")
+    st.caption(
+        "The twin's living state vector: all atmospheric VMRs and biosphere health "
+        "as they stand after the 79-day flare sequence. Updated each time Stage 2 runs."
+    )
+
+    bio = state.get('biosphere', {})
+    atm = state.get('atmosphere', {}).get('A', {})
+    atm_init = state.get('atmosphere_initial', {}).get('A', {})
+    post_wts = state.get('posterior_weights', {'A': 1/3, 'B': 1/3, 'C': 1/3})
+    meta = state.get('meta', {})
+
+    # ── Top metric row ───────────────────────────────────────────────────────
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    pf    = bio.get('population_factor', 1.0)
+    pf_pct = f"{pf*100:.1f}%"
+    bio_color = "normal" if pf > 0.5 else ("off" if pf < 0.2 else "inverse")
+    c1.metric("Twin last updated", meta.get('last_updated_by', 'stage1').upper(),
+              delta=meta.get('last_updated_utc', '')[:10])
+    c2.metric("Biosphere health",  pf_pct,
+              delta="STRESSED" if pf < 0.5 else "HEALTHY")
+    c3.metric("O3 (Atm A)", f"{atm.get('O3', 3e-7):.2e}",
+              delta=f"{(atm.get('O3',3e-7)/atm_init.get('O3',3e-7)-1)*100:+.1f}%" if atm_init.get('O3') else None)
+    c4.metric("CH4 (Atm A)", f"{atm.get('CH4', 1.8e-6):.2e}",
+              delta=f"{(atm.get('CH4',1.8e-6)/atm_init.get('CH4',1.8e-6)-1)*100:+.1f}%" if atm_init.get('CH4') else None)
+    c5.metric("CO biotic (Atm A)", f"{bio.get('co_vmr_biotic', 3e-9):.2e}",
+              delta=f"abiotic: {bio.get('co_vmr_abiotic', 1e-7):.1e}")
+    c6.metric("Best-fit posterior", f"Atm {max(post_wts, key=post_wts.get)}",
+              delta=f"p={max(post_wts.values()):.2f}")
+
+    st.markdown("---")
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.markdown("**State Vector Timeline** — 79-day evolution of Atm A species")
+        hist = state.get('history', [])
+        if hist:
+            h_df = pd.DataFrame(hist)
+            fig_h, axes_h = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+
+            species_panels = [
+                (['O3', 'N2O'], ['#1565C0', '#7B1FA2'], 'Ozone & N2O (VMR)'),
+                (['CH4'],       ['#2E7D32'],              'Methane (VMR)'),
+                (['population_factor'], ['#E65100'],      'Biosphere Population Factor'),
+            ]
+            for ax, (cols, clrs, title) in zip(axes_h, species_panels):
+                for col, clr in zip(cols, clrs):
+                    if col in h_df.columns:
+                        ax.plot(h_df['day'], h_df[col], color=clr, lw=1.8, label=col)
+                ax.set_ylabel(title, fontsize=8)
+                ax.legend(fontsize=7)
+                ax.grid(alpha=0.2)
+
+            axes_h[-1].set_xlabel('Days since start of observation', fontsize=9)
+            axes_h[0].set_title('Twin State Timeline — Atmospheric Evolution', fontsize=10)
+            plt.tight_layout()
+            st.pyplot(fig_h, use_container_width=True)
+            plt.close()
+        else:
+            st.info("Run Stage 2 to populate the twin state timeline.")
+
+    with col2:
+        st.markdown("**Biosphere Stress Log**")
+        stress_events = bio.get('stress_events', [])
+        if stress_events:
+            se_df = pd.DataFrame(stress_events)
+            se_df.columns = ['Day', 'EF_NUV', 'UV Dose (erg/cm2)', 'Pop. Factor']
+            st.dataframe(se_df.style.format({'EF_NUV': '{:.0f}',
+                                             'UV Dose (erg/cm2)': '{:.2e}',
+                                             'Pop. Factor': '{:.3f}'}),
+                         use_container_width=True)
+        else:
+            st.info("No high-stress flare events recorded yet.")
+
+        st.markdown("**Biosphere health**")
+        st.progress(float(pf))
+        st.caption(f"Population factor: {pf:.3f}  |  Active: {bio.get('active', True)}")
+
+        st.markdown("**JWST Posterior Weights**")
+        fig_pw, ax_pw = plt.subplots(figsize=(4, 2))
+        atm_labels = ['A: N2-Earth', 'B: CO2-Venus', 'C: Thin rock']
+        atm_keys   = ['A', 'B', 'C']
+        pw_vals    = [post_wts.get(k, 1/3) for k in atm_keys]
+        ax_pw.barh(atm_labels, pw_vals, color=['#1565C0', '#B71C1C', '#546E7A'], alpha=0.8)
+        ax_pw.set_xlim(0, 1)
+        ax_pw.set_xlabel('Posterior probability', fontsize=8)
+        ax_pw.axvline(1/3, color='gray', ls='--', lw=0.8, alpha=0.6)
+        for i, v in enumerate(pw_vals):
+            ax_pw.text(v + 0.02, i, f'{v:.2f}', va='center', fontsize=8)
+        plt.tight_layout()
+        st.pyplot(fig_pw, use_container_width=True)
+        plt.close()
+
+        obs_log = state.get('observations', [])
+        if obs_log:
+            st.markdown(f"**{len(obs_log)} JWST observation(s) assimilated**")
+            last = obs_log[-1]
+            st.caption(f"Last: {last.get('obs_id','?')} — best fit Atm {last.get('best_fit_atm','?')}, "
+                       f"chi2={last.get('chi2_best', 0):.2f}")
+
+
+def render_biosphere_engine(state, data):
+    """Tab: Biosphere Engine — CO/CH4 feedback and detectability."""
+    st.subheader("Biosphere Engine — Eager-Nash et al. 2024")
+    st.caption(
+        "The biosphere modulates two key spectral features: "
+        "CO (suppressed by consumption: 4CO + 2H2O → 2CO2 + CH3COOH) and "
+        "CH4 (enhanced by methanogenesis: 4H2 + CO2 → 2H2O + CH4). "
+        "On M-dwarf planets, abiotic CO from UV photolysis dominates the spectrum — "
+        "a living biosphere is the only known mechanism to suppress it."
+    )
+
+    bio   = state.get('biosphere', {})
+    col1, col2 = st.columns([3, 2])
+
+    with col1:
+        bio_on  = data.get('bio_on')
+        bio_off = data.get('bio_off')
+        bio_diff= data.get('bio_diff')
+
+        if bio_on is not None and bio_off is not None:
+            fig_b, axes_b = plt.subplots(2, 1, figsize=(12, 8),
+                                          gridspec_kw={'height_ratios': [3, 1]})
+            # Spectral comparison zoomed to CO + CH4 region
+            ax = axes_b[0]
+            m = (bio_on['wavelength_um'] >= 2.0) & (bio_on['wavelength_um'] <= 6.0)
+            ax.plot(bio_on['wavelength_um'][m], bio_on['transit_depth_ppm'][m],
+                    color='#2E7D32', lw=2.0, label='Biosphere ON (life present)')
+            ax.plot(bio_off['wavelength_um'][m], bio_off['transit_depth_ppm'][m],
+                    color='#B71C1C', lw=2.0, ls='--', label='Biosphere OFF (abiotic only)')
+            ax.fill_between(bio_on['wavelength_um'][m],
+                            bio_on['transit_depth_ppm'][m],
+                            bio_off['transit_depth_ppm'][m],
+                            alpha=0.18, color='green', label='Biosignature region')
+            for lam0, name, clr in [(3.3, 'CH4', '#1565C0'), (4.67, 'CO', '#E65100'),
+                                    (4.3, 'CO2', '#795548')]:
+                ax.axvline(lam0, color=clr, lw=0.9, ls=':', alpha=0.7)
+                ax.text(lam0, ax.get_ylim()[1] if ax.get_ylim()[1] != 0
+                        else bio_on['transit_depth_ppm'].max(),
+                        name, ha='center', fontsize=8, color=clr, va='top')
+            ax.set_ylabel('Transit Depth (ppm)', fontsize=10)
+            ax.set_title('Biosphere Spectral Fingerprint (Atm A, 2-6 um)\n'
+                         'CO suppression + CH4 enhancement = sign of life', fontsize=10)
+            ax.legend(fontsize=8)
+
+            # Spectral difference
+            ax_d = axes_b[1]
+            if bio_diff is not None:
+                m2 = (bio_diff['wavelength_um'] >= 2.0) & (bio_diff['wavelength_um'] <= 6.0)
+                diff = bio_diff['diff_ppm'][m2]
+                ax_d.bar(bio_diff['wavelength_um'][m2], diff,
+                         color=np.where(diff > 0, '#2E7D32', '#B71C1C'),
+                         width=0.05, alpha=0.8)
+            ax_d.axhline(0, color='k', lw=1)
+            ax_d.axhline(20, color='gray', ls='--', lw=0.8, label='JWST ~5-sigma (20 ppm)')
+            ax_d.axhline(-20, color='gray', ls='--', lw=0.8)
+            ax_d.set_xlabel('Wavelength (um)', fontsize=9)
+            ax_d.set_ylabel('Biosphere-ON minus -OFF (ppm)', fontsize=8)
+            ax_d.legend(fontsize=7)
+
+            plt.tight_layout()
+            st.pyplot(fig_b, use_container_width=True)
+            plt.close()
+        else:
+            st.info("Run Stage 3 to generate biosphere spectra (spectrum_atmA_biosphere_on/off.csv).")
+
+    with col2:
+        st.markdown("**Current biosphere state**")
+        pf = bio.get('population_factor', 1.0)
+        st.progress(float(pf))
+        st.metric("Population factor", f"{pf:.3f}", delta="ACTIVE" if bio.get('active', True) else "EXTINCT")
+        st.metric("CO abiotic VMR",  f"{bio.get('co_vmr_abiotic', 1e-7):.2e}")
+        st.metric("CO biotic VMR",   f"{bio.get('co_vmr_biotic', 3e-9):.2e}",
+                  delta=f"x{bio.get('co_vmr_abiotic',1e-7)/max(bio.get('co_vmr_biotic',3e-9),1e-30):.0f} suppression")
+        st.metric("CH4 production rate", f"{bio.get('ch4_production_rate', 1.0):.2f}x")
+
+        with st.expander("Eager-Nash+2024 reaction pathways"):
+            st.markdown(
+                "**Methanogenesis** (H2/CO-consuming archaea):  \n"
+                "`4H2 + CO2 → 2H2O + CH4`  \n\n"
+                "**CO consumption**:  \n"
+                "`4CO + 2H2O → 2CO2 + CH3COOH`  \n\n"
+                "**Abiotic O2 pathway** (M-dwarf specific):  \n"
+                "`CO2 + hν → CO + O`  \n"
+                "`CO2 photolysis is 5-10x stronger on M-dwarfs (higher FUV/NUV ratio)`  \n\n"
+                "**Key finding (Eager-Nash+2024):** CO is the dominant spectral feature "
+                "on TRAPPIST-1e because M-dwarf UV drives much more CO2 photolysis than "
+                "the Sun. A biosphere consuming CO suppresses this feature by ~30x, "
+                "creating a detectable ~1-2 ppm spectral change at CO 4.67 um."
+            )
+        st.warning(
+            "**Abiotic O2 false-positive (Eager-Nash+2024):**  \n"
+            "Enhanced CO2 photolysis produces 5-10x more abiotic O2 on M-dwarf planets "
+            "than on Earth-like orbits. O3 detection alone cannot confirm biology — "
+            "CO must also be assessed to rule out abiotic pathways."
+        )
+
+
+def render_forward_prediction(state):
+    """Tab: Forward Prediction — Monte Carlo future state projection."""
+    st.subheader("Forward Prediction Engine")
+    st.caption(
+        "Project the twin's atmospheric and biosphere state forward in time. "
+        "Uses Monte Carlo future flare sampling (Vida+2017 FFD) + photochem LUT + "
+        "biosphere feedback to forecast what TRAPPIST-1e's atmosphere will look like "
+        "in 30, 90, or 365 days."
+    )
+
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        horizon = cc1.selectbox("Forecast horizon", [30, 90, 365], index=1,
+                                 help="Days to project forward from current state")
+    with cc2:
+        rate_label = cc2.selectbox(
+            "Stellar activity", ["Nominal (0.53/day)", "High (1.06/day)", "Quiet (0.27/day)"])
+        rate_mult = {"Nominal (0.53/day)": 1.0, "High (1.06/day)": 2.0, "Quiet (0.27/day)": 0.5}[rate_label]
+    with cc3:
+        run_pred = cc3.button("Run Forward Prediction", type="primary")
+
+    pred = state.get('predictions', {})
+
+    if run_pred:
+        with st.spinner(f"Monte Carlo projection: {horizon} days..."):
+            try:
+                from twin_core import forward_predict, save_twin_state
+                pred = forward_predict(state, horizon_days=horizon,
+                                       flare_rate_multiplier=rate_mult)
+                save_twin_state(state)
+                st.success(f"Projection complete: {horizon}-day forecast saved to twin state.")
+            except Exception as e:
+                st.error(f"Prediction failed: {e}")
+
+    if not pred or 'days' not in pred:
+        st.info("Click 'Run Forward Prediction' to project the twin state forward.")
+        return
+
+    days  = np.array(pred['days'])
+    atm_p = pred.get('atm_A', {})
+    bio_p = pred.get('biosphere', {})
+
+    fig_p = plt.figure(figsize=(16, 12))
+    gs    = plt.GridSpec(3, 2, hspace=0.42, wspace=0.30)
+
+    # Row 1: O3 and CH4
+    ax_o3 = fig_p.add_subplot(gs[0, 0])
+    if 'O3' in atm_p:
+        o3 = np.array(atm_p['O3'])
+        ax_o3.plot(days, o3 * 1e7, color='#1565C0', lw=2, label='O3 (VMR x1e7)')
+        ax_o3.fill_between(days, o3*1e7*0.85, o3*1e7*1.15,
+                           alpha=0.2, color='#1565C0', label='±15% uncertainty')
+    ax_o3.axhline(3.0, color='gray', ls='--', lw=0.8, label='Initial (3.0e-7)')
+    ax_o3.set_ylabel('O3 VMR (x1e-7)', fontsize=9)
+    ax_o3.set_title('Ozone Forecast', fontsize=9)
+    ax_o3.legend(fontsize=7); ax_o3.grid(alpha=0.2)
+
+    ax_ch4 = fig_p.add_subplot(gs[0, 1])
+    if 'CH4' in atm_p:
+        ch4 = np.array(atm_p['CH4'])
+        ax_ch4.plot(days, ch4 * 1e6, color='#2E7D32', lw=2, label='CH4 (VMR x1e6)')
+        ax_ch4.fill_between(days, ch4*1e6*0.9, ch4*1e6*1.1,
+                            alpha=0.2, color='#2E7D32', label='±10% uncertainty')
+    ax_ch4.axhline(1.8, color='gray', ls='--', lw=0.8, label='Initial (1.8e-6)')
+    ax_ch4.set_ylabel('CH4 VMR (x1e-6)', fontsize=9)
+    ax_ch4.set_title('Methane Forecast', fontsize=9)
+    ax_ch4.legend(fontsize=7); ax_ch4.grid(alpha=0.2)
+
+    # Row 2: CO (key Eager-Nash result)
+    ax_co = fig_p.add_subplot(gs[1, 0])
+    if 'co_vmr' in bio_p:
+        co = np.array(bio_p['co_vmr'])
+        ax_co.plot(days, co * 1e9, color='#E65100', lw=2, label='CO biotic (VMR x1e9)')
+    if 'CO' in atm_p:
+        co_abiotic = np.array(atm_p['CO'])
+        ax_co.plot(days, co_abiotic * 1e9, color='#FF8F00', lw=1.5, ls='--',
+                   label='CO abiotic (no biosphere)')
+    ax_co.set_ylabel('CO VMR (x1e-9)', fontsize=9)
+    ax_co.set_title('CO: Biotic vs Abiotic\n(Eager-Nash+2024 — key biosignature)', fontsize=9)
+    ax_co.legend(fontsize=7); ax_co.grid(alpha=0.2)
+
+    # Row 2: Biosphere population
+    ax_pf = fig_p.add_subplot(gs[1, 1])
+    if 'population_factor' in bio_p:
+        pf_arr = np.array(bio_p['population_factor'])
+        colors = ['#2E7D32' if v > 0.5 else '#F57F17' if v > 0.2 else '#B71C1C'
+                  for v in pf_arr]
+        ax_pf.scatter(days, pf_arr, c=colors, s=8, alpha=0.6)
+        ax_pf.plot(days, pf_arr, color='gray', lw=0.5, alpha=0.4)
+        ax_pf.axhline(0.5, color='#F57F17', ls='--', lw=0.8, label='Stress threshold')
+        ax_pf.axhline(0.2, color='#B71C1C', ls='--', lw=0.8, label='Extinction risk')
+    ax_pf.set_ylim(0, 1.05)
+    ax_pf.set_ylabel('Population factor', fontsize=9)
+    ax_pf.set_title('Biosphere Health Forecast', fontsize=9)
+    ax_pf.legend(fontsize=7); ax_pf.grid(alpha=0.2)
+
+    # Row 3: Detection horizon
+    ax_det = fig_p.add_subplot(gs[2, :])
+    if 'O3' in atm_p and 'CH4' in atm_p:
+        o3_amp_init  = 12.7   # ppm (from Stage 3)
+        ch4_amp_init = 33.4
+        o3_arr  = np.array(atm_p['O3'])
+        ch4_arr = np.array(atm_p['CH4'])
+        o3_init = 3.0e-7
+        ch4_init= 1.8e-6
+        o3_amps  = o3_amp_init  * (o3_arr  / o3_init)
+        ch4_amps = ch4_amp_init * (ch4_arr / ch4_init)
+        trans_o3  = np.clip((5.0 * 50.0 / np.maximum(o3_amps,  0.1))**2, 1, 5000)
+        trans_ch4 = np.clip((5.0 * 50.0 / np.maximum(ch4_amps, 0.1))**2, 1, 5000)
+        ax_det.plot(days, trans_o3,  color='#1565C0', lw=2, label='Transits for O3 5-sigma')
+        ax_det.plot(days, trans_ch4, color='#2E7D32', lw=2, label='Transits for CH4 5-sigma')
+        ax_det.axhline(5, color='red', ls='--', lw=1.2, label='DREAMS programme depth (5 transits)')
+    ax_det.set_ylabel('Transits needed for 5-sigma detection', fontsize=9)
+    ax_det.set_xlabel(f'Days from now (horizon: {horizon} days, {rate_label})', fontsize=9)
+    ax_det.set_title('JWST Detection Horizon Forecast — When Will Biosignatures Become Observable?',
+                     fontsize=10)
+    ax_det.set_ylim(0, 200)
+    ax_det.legend(fontsize=8); ax_det.grid(alpha=0.2)
+
+    plt.suptitle(f"TRAPPIST-1e Digital Twin: {horizon}-day Forward Prediction | {rate_label}",
+                 fontsize=12, fontweight='bold')
+    st.pyplot(fig_p, use_container_width=True)
+    plt.close()
+
+    # Download button
+    if 'days' in pred:
+        export_rows = []
+        for i, day in enumerate(pred['days']):
+            row = {'day': day}
+            for sp in ['O3', 'CH4', 'CO', 'N2O', 'NO2']:
+                if sp in atm_p:
+                    row[f'atm_A_{sp}'] = atm_p[sp][i]
+            if 'population_factor' in bio_p:
+                row['biosphere_pf'] = bio_p['population_factor'][i]
+            export_rows.append(row)
+        export_df = pd.DataFrame(export_rows)
+        st.download_button(
+            "Download forecast CSV",
+            export_df.to_csv(index=False).encode(),
+            file_name=f"trappist1e_forecast_{horizon}d.csv",
+            mime="text/csv",
+        )
+
+
+# ===========================================================================
 # STREAMLIT DASHBOARD
 # ===========================================================================
 def run_streamlit_dashboard():
@@ -468,10 +836,13 @@ def run_streamlit_dashboard():
     # ── Title ───────────────────────────────────────────────────────────────
     st.title("TRAPPIST-1e Digital Twin")
     st.markdown(
-        "**Modeling stellar flare interference with biosignature detection** — "
-        "TESS flares → photochemistry → JWST spectral calibration  \n"
-        "Pipeline: Stage 1 (Ingest) → Stage 2 (Atmosphere) → Stage 3 (Spectra) → Stage 4 (Calibration)  \n"
-        "*Espinoza+2025 DREAMS | Ducrot+2022 | Segura+2010 | Chen+2021 | Ridgway+2023*"
+        "**A dynamic virtual replica of TRAPPIST-1e's atmosphere and biosphere** — "
+        "continuously updated as stellar flares accumulate, JWST observations arrive, "
+        "and the twin's biosphere responds.  \n"
+        "Pipeline: Stage 1 (Ingest) → Stage 2 (Atmosphere + Biosphere) → "
+        "Stage 3 (Spectra) → Stage 4 (Calibration + Prediction)  \n"
+        "*Espinoza+2025 DREAMS | Eager-Nash+2024 | Ducrot+2022 | Segura+2010 | "
+        "Chen+2021 | Ridgway+2023*"
     )
 
     # ── Load data (cached) ──────────────────────────────────────────────────
@@ -480,6 +851,13 @@ def run_streamlit_dashboard():
         return load_all_data()
 
     data = _load()
+
+    # ── Load digital twin state (short TTL so dashboard stays fresh) ─────────
+    @st.cache_data(ttl=30)
+    def _twin():
+        return load_twin_state_cached()
+
+    twin_state = _twin()
     cat  = data['cat']
     uv   = data['uv']
     spectra_df = data['spectra']
@@ -542,6 +920,37 @@ def run_streamlit_dashboard():
             "- No magnetic field shielding  \n"
         )
 
+        st.markdown("---")
+        st.markdown("**JWST Data Assimilation**")
+        st.caption("Upload a real or synthetic JWST spectrum to update the twin's posterior weights.")
+        uploaded = st.file_uploader("Upload JWST spectrum (CSV)", type=["csv"],
+                                     help="Columns: wavelength_um, transit_depth_ppm, [uncertainty_ppm]")
+        if uploaded is not None:
+            try:
+                jwst_up = pd.read_csv(uploaded)
+                if 'wavelength_um' in jwst_up.columns and 'transit_depth_ppm' in jwst_up.columns:
+                    if 'uncertainty_ppm' not in jwst_up.columns:
+                        jwst_up['uncertainty_ppm'] = 40.0
+                    lam_j = jwst_up['wavelength_um'].values
+                    obs_p = jwst_up['transit_depth_ppm'].values
+                    sig_p = jwst_up['uncertainty_ppm'].values
+                    # Build spectra dict for assimilation
+                    spectra_dict = {}
+                    for (atm_l, scen), grp in data['spectra'].groupby(['atmosphere', 'scenario']):
+                        g = grp.sort_values('wavelength_um')
+                        spectra_dict[(atm_l, scen)] = np.interp(
+                            lam_j, g['wavelength_um'].values, g['transit_depth_ppm'].values)
+                    from twin_core import assimilate_observation, save_twin_state as _save
+                    assimilate_observation(twin_state, lam_j, obs_p, sig_p,
+                                           spectra_dict, obs_id=uploaded.name)
+                    _save(twin_state)
+                    st.success(f"Assimilated! Best fit: Atm {twin_state['posterior_weights'] and max(twin_state['posterior_weights'], key=twin_state['posterior_weights'].get)}")
+                    st.rerun()
+                else:
+                    st.error("CSV must have columns: wavelength_um, transit_depth_ppm")
+            except Exception as e:
+                st.error(f"Assimilation error: {e}")
+
     calib_df, jwst_df = _calib(n_transits)
 
     # ── Metric cards ────────────────────────────────────────────────────────
@@ -561,13 +970,16 @@ def run_streamlit_dashboard():
               delta="JWST detection horizon ~20 ppm")
 
     # ── Tabs ────────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab0, tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "Twin State Monitor",
         "Flare Timeline",
         "Spectral Comparison",
         "Biosignature Vulnerability",
         "Calibration Residuals",
         "Chi-squared Grid",
         "Flare Animation",
+        "Biosphere Engine",
+        "Forward Prediction",
     ])
 
     # ========================================================================
@@ -1089,6 +1501,24 @@ def run_streamlit_dashboard():
                 "that **individual flares do not produce detectable spectral changes** "
                 "with the current observing programme."
             )
+
+    # ========================================================================
+    # TAB 0: TWIN STATE MONITOR
+    # ========================================================================
+    with tab0:
+        render_twin_state_monitor(twin_state, data)
+
+    # ========================================================================
+    # TAB 7: BIOSPHERE ENGINE
+    # ========================================================================
+    with tab7:
+        render_biosphere_engine(twin_state, data)
+
+    # ========================================================================
+    # TAB 8: FORWARD PREDICTION
+    # ========================================================================
+    with tab8:
+        render_forward_prediction(twin_state)
 
     # ── Footer ──────────────────────────────────────────────────────────────
     st.markdown("---")

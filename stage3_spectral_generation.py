@@ -827,6 +827,117 @@ def compute_feature_amplitudes(lam_um, results):
 
 
 # ===========================================================================
+# SECTION 7: Biosphere Spectra — Eager-Nash+2024 CO/CH4 Signature
+# ===========================================================================
+def load_twin_biosphere():
+    """
+    Load biosphere state from twin_state.json for Atm A.
+    Returns (co_vmr_biotic, co_vmr_abiotic, population_factor, ch4_biogenic)
+    or defaults if twin_state.json does not exist.
+    """
+    try:
+        from twin_core import load_twin_state
+        state = load_twin_state()
+        bio = state.get('biosphere', {})
+        return (
+            bio.get('co_vmr_biotic',    3.0e-9),
+            bio.get('co_vmr_abiotic',   1.0e-7),
+            bio.get('population_factor', 1.0),
+            state['atmosphere']['A'].get('CH4', 1.8e-6),
+        )
+    except Exception:
+        return 3.0e-9, 1.0e-7, 1.0, 1.8e-6
+
+
+def build_biosphere_spectra(lam_um, atm_A_base):
+    """
+    Compute two Atm A spectra that reveal the biosphere's spectral fingerprint:
+
+      biosphere_on  — CO consumed by life (CO ~3e-9), CH4 boosted by methanogenesis
+      biosphere_off — abiotic CO from M-dwarf UV (CO ~1e-7, 30x higher), baseline CH4
+
+    The spectral DIFFERENCE between these two is the direct biosignature of the
+    biosphere (Eager-Nash+2024): CO 4.67 um feature is suppressed, CH4 3.3 um
+    is enhanced. CO is a dominant feature on M-dwarf planets precisely because
+    M-dwarf UV drives more CO2 photolysis than Sun-like stars.
+
+    Saves:
+      Stage 3 Files/spectrum_atmA_biosphere_on.csv
+      Stage 3 Files/spectrum_atmA_biosphere_off.csv
+      Stage 3 Files/biosphere_spectral_diff.csv
+    """
+    import copy
+
+    co_biotic, co_abiotic, pf, ch4_biogenic = load_twin_biosphere()
+
+    # All species for cross-section computation
+    all_species = list(atm_A_base['vmr'].keys())
+    if 'CO' not in all_species:
+        all_species.append('CO')
+    sigma = compute_cross_sections(lam_um, all_species)
+
+    # --- Biosphere-ON: life is consuming CO and producing CH4 ---------------
+    atm_on = copy.deepcopy(atm_A_base)
+    atm_on['vmr']['CO']  = float(co_biotic)
+    atm_on['vmr']['CH4'] = float(ch4_biogenic)  # enhanced by methanogenesis
+
+    delta_on, _, H_on = compute_transmission_spectrum(atm_on, lam_um, sigma)
+    df_on = pd.DataFrame({
+        'wavelength_um':     lam_um,
+        'transit_depth_ppm': delta_on * 1e6,
+        'atmosphere':        'A',
+        'scenario':          'biosphere_on',
+        'co_vmr':            co_biotic,
+        'ch4_vmr':           ch4_biogenic,
+        'population_factor': pf,
+    })
+    df_on.to_csv(f"{OUTPUT_DIR}/spectrum_atmA_biosphere_on.csv", index=False)
+
+    # --- Biosphere-OFF: abiotic only, no CO consumption, no biogenic CH4 ----
+    atm_off = copy.deepcopy(atm_A_base)
+    atm_off['vmr']['CO']  = float(co_abiotic)   # 30x higher — dominant feature
+    atm_off['vmr']['CH4'] = float(atm_A_base['vmr'].get('CH4', 1.8e-6))  # no boost
+
+    delta_off, _, H_off = compute_transmission_spectrum(atm_off, lam_um, sigma)
+    df_off = pd.DataFrame({
+        'wavelength_um':     lam_um,
+        'transit_depth_ppm': delta_off * 1e6,
+        'atmosphere':        'A',
+        'scenario':          'biosphere_off',
+        'co_vmr':            co_abiotic,
+        'ch4_vmr':           atm_A_base['vmr'].get('CH4', 1.8e-6),
+        'population_factor': 0.0,
+    })
+    df_off.to_csv(f"{OUTPUT_DIR}/spectrum_atmA_biosphere_off.csv", index=False)
+
+    # --- Spectral difference (biosphere signature) ---------------------------
+    diff_ppm = delta_on * 1e6 - delta_off * 1e6
+    df_diff = pd.DataFrame({
+        'wavelength_um': lam_um,
+        'diff_ppm':      diff_ppm,
+        'sign':          np.where(diff_ppm > 0, 'biosphere_enhanced', 'biosphere_suppressed'),
+    })
+    df_diff.to_csv(f"{OUTPUT_DIR}/biosphere_spectral_diff.csv", index=False)
+
+    # Print key feature deltas
+    co_band  = (lam_um >= 4.5) & (lam_um <= 4.9)
+    ch4_band = (lam_um >= 3.1) & (lam_um <= 3.5)
+    co_diff  = float(np.nanmean(diff_ppm[co_band]))  if co_band.any()  else 0.0
+    ch4_diff = float(np.nanmean(diff_ppm[ch4_band])) if ch4_band.any() else 0.0
+
+    print(f"  CO  4.67um: biosphere_on = {float(np.nanmean(delta_on[co_band]*1e6)):.1f} ppm, "
+          f"biosphere_off = {float(np.nanmean(delta_off[co_band]*1e6)):.1f} ppm  "
+          f"(diff = {co_diff:+.1f} ppm)")
+    print(f"  CH4 3.3um:  biosphere_on = {float(np.nanmean(delta_on[ch4_band]*1e6)):.1f} ppm, "
+          f"biosphere_off = {float(np.nanmean(delta_off[ch4_band]*1e6)):.1f} ppm  "
+          f"(diff = {ch4_diff:+.1f} ppm)")
+    print(f"  Biosphere CO suppression factor: {co_abiotic / max(co_biotic, 1e-30):.0f}x")
+    print(f"  Biosphere population factor:     {pf:.3f}")
+
+    return df_on, df_off, df_diff
+
+
+# ===========================================================================
 # SECTION 9: Main Pipeline
 # ===========================================================================
 if __name__ == "__main__":
@@ -897,6 +1008,13 @@ if __name__ == "__main__":
     print("="*65)
 
     combined_df = save_spectra(lam_um, results)
+
+    print("\n" + "="*65)
+    print("SECTION 7: Biosphere Spectra (Eager-Nash+2024)")
+    print("="*65)
+    atm_A_for_bio = atms['A']  # use the base Atm A composition
+    df_bio_on, df_bio_off, df_bio_diff = build_biosphere_spectra(lam_um, atm_A_for_bio)
+    print(f"  Saved biosphere_on, biosphere_off, biosphere_spectral_diff CSVs")
 
     # ── Feature amplitudes ─────────────────────────────────────────────────
     print("\n" + "="*65)

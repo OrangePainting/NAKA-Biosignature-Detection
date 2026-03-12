@@ -357,6 +357,28 @@ Provides the theoretical basis for the **stellar contamination correction** appl
 
 ---
 
+## Biosphere Models
+
+### Eager-Nash et al. 2024
+
+**Full citation:** Eager-Nash, J.K., et al. (2024). *Life on TRAPPIST-1e: The Impact of a Biosphere on Atmospheric Chemistry.* MNRAS, 531, 468.
+
+**Used in:** Stage 2 — biosphere model (CO consumption, methanogenesis, UV stress); `twin_core.py` — biosphere state equations; Stage 3 — biosphere-on vs biosphere-off spectra; Stage 4 — Biosphere Engine tab
+
+This is the scientific foundation for the **biosphere feedback loops** that transform the pipeline into a true digital twin. Four specific contributions:
+
+1. **CO dominance finding:** M-dwarf UV drives CO₂ photolysis at **5–10× the rate of Sun-like stars**. On an abiotic TRAPPIST-1e, CO (not O₂, not O₃) would be the dominant atmospheric species and the clearest spectral feature. This is why Atmosphere A now includes `CO = 1×10⁻⁷ VMR` as the abiotic baseline.
+
+2. **Biosphere CO consumption:** The paper models a biosphere of H₂/CO-consuming anaerobes that suppress CO from ~1×10⁻⁷ VMR to ~3×10⁻⁹ via `4CO + 2H₂O → 2CO₂ + CH₃COOH`. This ~30× difference between biotic and abiotic CO is the single strongest spectral fingerprint of life in the twin's model. Implemented in `twin_core.py` as `biosphere_co_consumption()` with `_BIO_CO_CONSUMPTION = 0.97` suppression efficiency.
+
+3. **Methanogenesis:** The same biosphere drives CH₄ production via `4H₂ + CO₂ → 2H₂O + CH₄`, partially offsetting UV-driven OH oxidation of CH₄. Implemented in `twin_core.py` as `biosphere_ch4_production()` at rate `2×10⁻¹¹ VMR/day` × population_factor.
+
+4. **UV stress model and ocean-atmosphere transfer:** High-UV flare events degrade the biosphere with stress scale `σ = 5×10⁹ erg/cm²` and exponential recovery `τ_recovery = 730 days`. The paper also provides ocean-atmosphere transfer parameters for H₂ and CO exchange that inform the geological supply rates used in the model.
+
+The biosphere's impact on the CO 4.67 µm band is directly visualised in Stage 3's `build_biosphere_spectra()` and in the Stage 4 Biosphere Engine tab.
+
+---
+
 ## Summary Table
 
 | Source | Stage(s) | Specific values / functions extracted |
@@ -388,3 +410,4 @@ Provides the theoretical basis for the **stellar contamination correction** appl
 | Gordon et al. 2022 (HITRAN2020) | 3 | All band centres and cross-sections |
 | Rothman et al. 2010 (HITEMP) | 3 | H₂O cross-section parameters |
 | Rackham et al. 2018 | 4 | Stellar contamination slope model |
+| Eager-Nash et al. 2024 | 2, 3, 4 | CO dominance; biosphere CO/CH₄ model; UV stress scale |

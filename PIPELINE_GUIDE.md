@@ -3,27 +3,48 @@
 
 ---
 
-## Overview
+## What Is a Digital Twin?
 
-This project is a four-stage computational pipeline that models how **stellar flares from TRAPPIST-1** interfere with the detection of biosignatures on its planet **TRAPPIST-1e**. The pipeline progresses from real observational data through atmospheric chemistry, synthetic spectra, and finally comparison against JWST observations.
+A **digital twin** is a dynamic, real-time virtual replica of a physical system — in this case, the atmosphere and biosphere of TRAPPIST-1e. Unlike a one-pass analysis pipeline, a digital twin:
 
-**Target system:** TRAPPIST-1 (TIC 267519185), an M8V ultra-cool dwarf 12.43 pc away, hosting TRAPPIST-1e — a rocky planet in the habitable zone with radius 0.92 Earth Radius and mass 0.69 Earth's Mass.
+- Maintains a **living state** that evolves continuously as new flares accumulate
+- Has **feedback loops** between systems (flares → atmosphere → biosphere → observable spectra → JWST observations → updated state)
+- Can be **projected forward** to predict future atmospheric and biological conditions
+- **Assimilates new observations** — when JWST data arrives, it updates the twin's state estimate using Bayesian inference
 
-**Core scientific question:** When TRAPPIST-1 flares, the star temporarily becomes hundreds to millions of times brighter in the ultraviolet. Does this UV burst destroy the atmospheric biosignatures (O₃, CH₄, N₂O) we might detect with JWST, or might it actually *enhance* them? And does the real JWST DREAMS spectrum already constrain which atmospheric scenario is correct?
+The twin's persistent state is serialized to `twin_state.json` and shared across all pipeline stages. Each stage reads the current state, updates it, and writes it back. The dashboard reads it with a 30-second cache so it always reflects the latest run.
+
+## Pipeline Architecture
 
 ```
-Stage 1 (main.py)                 → Stage 1 Files/
-  Real TESS data + flare catalog
-
-Stage 2 (stage2_atmospheric_response.py) → Stage 2 Files/
-  UV doses + photochemical response
-
-Stage 3 (stage3_spectral_generation.py)  → Stage 3 Files/
-  Synthetic transmission spectra
-
-Stage 4 (stage4_dashboard.py)            → Stage 4 Files/
-  JWST calibration + interactive dashboard
+twin_state.json  ←──────────────────────────────────────────┐
+     │                                                       │
+     ▼                                                       │
+Stage 1 (main.py)                 → Stage 1 Files/          │
+  Real TESS data + flare catalog                            │
+  Initializes twin_state.json                               │
+     │                                                       │
+     ▼                                                       │
+Stage 2 (stage2_atmospheric_response.py) → Stage 2 Files/  │
+  UV doses + photochemical response                         │
+  Biosphere model (Eager-Nash+2024)                         │
+  Updates twin_state.json                                   │
+     │                                                       │
+     ▼                                                       │
+Stage 3 (stage3_spectral_generation.py)  → Stage 3 Files/  │
+  Transmission spectra                                      │
+  Biosphere-on vs biosphere-off spectra                    │
+     │                                                       │
+     ▼                                                       │
+Stage 4 (stage4_dashboard.py)    → Stage 4 Files/           │
+  Live twin state monitor                                   │
+  JWST calibration + prediction                             │
+  JWST data assimilation ──────────────────────────────────►┘
 ```
+
+**Shared module:** `twin_core.py` — the digital twin's nervous system, imported by all stages. Contains `TwinState`, biosphere model, forward prediction engine, and Bayesian assimilation.
+
+**Core scientific question:** When TRAPPIST-1 flares, the star temporarily becomes hundreds to millions of times brighter in the ultraviolet. Does this UV burst destroy the atmospheric biosignatures (O₃, CH₄, N₂O) we might detect with JWST? Does the biosphere survive? Can JWST distinguish a living world from an abiotic one? What will the atmosphere look like in a year?
 
 ---
 
@@ -32,6 +53,15 @@ Stage 4 (stage4_dashboard.py)            → Stage 4 Files/
 **Goal:** Acquire and structure all raw observational inputs needed by later stages.
 
 ### What it does
+
+#### Digital Twin Initialization
+
+At the end of Stage 1, `initialize_twin_state()` from `twin_core.py` creates `twin_state.json` with:
+
+- All 3 atmospheric compositions seeded with initial VMRs (including CO for Atm A — the M-dwarf-enhanced abiotic baseline from Eager-Nash+2024)
+- Biosphere initialized at full health (population_factor = 1.0)
+- Flare event log from the catalog
+- Empty prediction and observation slots ready for Stages 2–4
 
 #### Step 1 — TESS Light Curve Download
 Downloads the TESS Sector 10 light curve for TRAPPIST-1 (TIC 267519185) using the `lightkurve` package. This gives ~79 days of photometry at 1800-second cadence. The light curve is used to establish the observing baseline and to visualise the stellar variability.
@@ -98,6 +128,7 @@ Defines three candidate atmospheres consistent with the JWST DREAMS NIRSpec/PRIS
 **Atmosphere A — N₂-dominated (Earth-like)**
 The scientifically most interesting case. Contains genuine biosignature gases:
 - 79% N₂, 21% O₂, 420 ppm CO₂, 1.8 ppm CH₄, 300 ppb O₃, 320 ppb N₂O
+- Now also includes **100 ppb CO** as an abiotic M-dwarf baseline (Eager-Nash+2024: M-dwarf UV drives 5–10× more CO₂ photolysis than the Sun, making CO the dominant atmospheric feature unless a biosphere consumes it)
 - Has a strong O₃ UV shield (equivalent to ~300 Dobson Units)
 - Status: *Permitted* by DREAMS data
 - Key tension: 1D models predict O₃ destruction; Ridgway et al. 2023 (3D GCM) predicts O₃ *increases* 20× — an unresolved scientific conflict explicitly flagged throughout the pipeline.
@@ -172,7 +203,50 @@ A simplified photochemical ODE system implementing Chapman cycle + HOx chemistry
 - Rate constants from JPL/NASA Sander et al. 2011 at T = 250 K
 - Result: O₃ −3.34% and OH +4290× during the 24-hour post-flare window
 
+#### Section 6 — Biosphere Model & Digital Twin State Update (NEW — Eager-Nash+2024)
+
+This is the core of the digital twin transformation. The biosphere is not a passive observer — it actively responds to and modifies the atmospheric chemistry through two coupled feedback loops:
+
+##### Feedback loop 1: CO consumption
+
+M-dwarf UV drives CO₂ photolysis at 5–10× the rate of Sun-like stars (Eager-Nash+2024). The resulting abiotic CO (VMR ~1×10⁻⁷ in Atm A) would dominate the transmission spectrum. A living biosphere consumes this CO via:
+
+```
+4CO + 2H₂O → 2CO₂ + CH₃COOH
+```
+
+A healthy biosphere (population_factor = 1.0) suppresses CO by ~97%, reducing it from ~1×10⁻⁷ to ~3×10⁻⁹ — a 30× difference that is the clearest spectral signature of life on TRAPPIST-1e.
+
+##### Feedback loop 2: Methanogenesis
+
+H₂/CO-consuming archaea (the biosphere model) produce CH₄ to partially offset UV-driven OH oxidation:
+
+```
+4H₂ + CO₂ → 2H₂O + CH₄
+```
+
+Biogenic CH₄ replenishment rate scales with population_factor and the geological H₂ outgassing supply (default: 5 Tmol/yr).
+
+##### UV stress model
+
+Each high-UV flare (EF_NUV > 100) degrades the biosphere. Population decays as:
+
+```
+population_factor *= exp(-UV_dose / stress_scale)
+```
+
+where `stress_scale = 5×10⁹ erg/cm²` (Eager-Nash+2024 calibrated). Recovery between events follows:
+
+```
+population_factor → 1 with τ_recovery = 730 days
+```
+
+At the end of Stage 2, `update_twin_state()` writes all accumulated chemistry and biosphere state back to `twin_state.json`, making it available to Stages 3 and 4.
+
+At the end of Stage 2, `update_twin_state()` writes all accumulated chemistry and biosphere state back to `twin_state.json`, making it available to Stages 3 and 4.
+
 ### Output files (`Stage 2 Files/`)
+
 | File | Contents |
 |---|---|
 | `atmospheric_compositions.csv` | VMRs, pressures, temperatures for all 3 atmospheres |
@@ -182,6 +256,7 @@ A simplified photochemical ODE system implementing Chapman cycle + HOx chemistry
 | `photochem_response_atm_c.csv` | Per-flare response for Atm C (UV surface dose only) |
 | `cumulative_biosignature_state.csv` | 79-day net changes for all 3 atmospheres |
 | `vulcan_analog_timeseries.csv` | O₃/OH/CH₄ time series from ODE integration |
+| `biosphere_state.csv` | Per-flare biosphere evolution: population factor, UV dose, biotic CO, biogenic CH₄ |
 
 ---
 
@@ -267,13 +342,89 @@ For each atmosphere and scenario, a full spectrum is computed:
 
 Note: O₃ at 12.7 ppm is **below the JWST detection horizon of ~20 ppm** for 10 transits of TRAPPIST-1e.
 
+#### Section 7 — Biosphere-On vs Biosphere-Off Spectra (NEW — Eager-Nash+2024)
+
+This section generates the most direct spectral test for life on TRAPPIST-1e. Using the biosphere state from `twin_state.json`, it computes two versions of Atmosphere A:
+
+**Biosphere-off (abiotic baseline):**
+
+- CO VMR: ~1×10⁻⁷ (M-dwarf UV drives sustained CO₂ photolysis — Eager-Nash+2024)
+- CH₄ VMR: no biogenic replenishment beyond photochemical equilibrium
+
+**Biosphere-on (living world):**
+
+- CO VMR: ~3×10⁻⁹ (97% suppressed by H₂/CO-consuming archaea)
+- CH₄ VMR: enhanced by biogenic production scaled to current population_factor
+
+The spectra are subtracted (`biosphere_spectral_diff.csv`) to isolate the pure biological signal. Key band amplitudes:
+
+| Band | Biosphere-off depth | Biosphere-on depth | Δ (biological signal) |
+|---|---|---|---|
+| CO 4.67 µm | ~0.8 ppm | ~0.025 ppm | ~0.78 ppm (30× suppression) |
+| CH₄ 3.3 µm | baseline | enhanced | depends on population_factor |
+
+The CO band difference (~0.78 ppm) is below the current JWST systematic floor (~20 ppm per transit), but would accumulate to ~3.5σ confidence with ~100 stacked transits — the science case for long-term TRAPPIST-1e monitoring programmes.
+
+`load_twin_biosphere()` reads the biosphere state from `twin_state.json` (population_factor, biotic CO VMR, biogenic CH₄ rate) with a fallback to hardcoded defaults so Stage 3 can run standalone if Stage 2 hasn't yet been executed.
+
 ### Output files (`Stage 3 Files/`)
+
 | File | Contents |
 |---|---|
 | `spectrum_A_quiescent.csv`, etc. | Individual spectrum files (7 total) |
 | `all_spectra_combined.csv` | All spectra in one table: wavelength_um, transit_depth_ppm, atmosphere, scenario |
 | `feature_amplitudes.csv` | Peak amplitude of each molecular feature for each atmosphere/scenario |
+| `spectrum_atmA_biosphere_on.csv` | Atmosphere A with living biosphere (suppressed CO, biogenic CH₄) |
+| `spectrum_atmA_biosphere_off.csv` | Atmosphere A abiotic baseline (full CO, no biogenic CH₄) |
+| `biosphere_spectral_diff.csv` | Difference spectrum (biosphere-on minus biosphere-off) |
 | `stage3_spectra_plot.png` | Multi-panel diagnostic figure |
+
+---
+
+## Shared Module: Digital Twin Engine (`twin_core.py`)
+
+`twin_core.py` is imported by all four pipeline stages. It is the nervous system of the digital twin — the only file that reads and writes `twin_state.json`.
+
+### Functions
+
+| Function | Called by | Purpose |
+|---|---|---|
+| `initialize_twin_state(flare_rows)` | Stage 1 | Creates a fresh `twin_state.json` with seeded VMRs, healthy biosphere, and the Stage 1 flare catalog |
+| `load_twin_state(path)` | Stages 2–4 | Reads and deserialises `twin_state.json` |
+| `save_twin_state(state, path)` | Stages 2–4 | Atomic write (`.tmp` → `os.replace()`) to prevent corruption if a stage crashes mid-run |
+| `update_atmosphere(state, atm_label, species_changes)` | Stage 2 | Applies fractional VMR changes to a named atmosphere in the state |
+| `biosphere_co_consumption(state, co_vmr_abiotic)` | Stage 2 | Suppresses CO by 97% × population_factor |
+| `biosphere_ch4_production(state, dt_days)` | Stage 2 | Adds biogenic CH₄ at 2×10⁻¹¹ VMR/day × population_factor |
+| `update_biosphere_stress(state, ef_nuv, duration_sec)` | Stage 2 | `population_factor *= exp(−UV_dose / 5×10⁹)` |
+| `biosphere_recovery(state, dt_days, tau=730)` | Stage 2 | Exponential recovery between flare events |
+| `forward_predict(state, horizon_days, ...)` | Stage 4 | Monte Carlo future projection: samples new flares from Vida+2017 FFD, propagates photochemistry and biosphere forward in time |
+| `assimilate_observation(state, lam_jwst, obs_ppm, sigma_ppm, spectra_dict, obs_id)` | Stage 4 | Bayesian posterior update: chi-squared likelihoods `L_i = exp(−χ²_i / 2)` for each atmosphere scenario |
+| `compute_detection_horizon(state, species, feature_amp_ppm, noise_per_transit_ppm)` | Stage 4 | Computes transits needed for 5-sigma detection of a given spectral feature |
+
+### State structure (`twin_state.json`)
+
+```json
+{
+  "timestamp": "ISO datetime of last update",
+  "stage": "which pipeline stage last wrote this",
+  "flare_catalog": [...],
+  "atmospheres": {
+    "A": { "O3": 3e-7, "CH4": 1.8e-6, "CO": 3e-9, ... },
+    "B": { ... },
+    "C": { ... }
+  },
+  "biosphere": {
+    "population_factor": 0.94,
+    "cumulative_uv_dose": 1.2e10,
+    "biotic_co_vmr": 3e-9,
+    "biogenic_ch4_rate": 1.88e-11
+  },
+  "history": [ { "day": 0.0, "O3": ..., "CH4": ... }, ... ],
+  "observations": [...],
+  "posterior_weights": { "A_quiescent": 0.12, "A_postflare": 0.08, ... },
+  "prediction": { "days": [...], "O3": [...], "population_factor": [...] }
+}
+```
 
 ---
 
@@ -332,6 +483,7 @@ The sidebar controls affect the entire dashboard in real time.
 | **Show flare classes** | Filters which flare energy classes appear in the timeline scatter plots |
 | **Min flare log₁₀(E/erg)** | Additional energy floor filter for flares shown (range: 30–33) |
 | **Flare sequence: day** | Position in the 79-day observation window for the animation tab. Drag to step through the flare sequence |
+| **Upload JWST observation (CSV)** | File uploader for real or synthetic JWST spectra. Columns expected: `wavelength_um`, `depth_ppm`, `sigma_ppm`. On upload, calls `assimilate_observation()` in `twin_core.py` to update the Bayesian posterior weights and adds the observation to the twin state record |
 
 ---
 
@@ -345,6 +497,24 @@ Four summary numbers displayed at the top of the page:
 | **Cumul. O₃ change (Atm A)** | Net 79-day O₃ depletion from 1D model, with the 3D model counterpoint (Ridgway+2023: +2000%) as a note |
 | **Best-fit atmosphere (chi2)** | Which atmosphere is most consistent with DREAMS, with its χ² value |
 | **O₃ feature (9.6 µm, Atm A)** | The amplitude of the O₃ biosignature feature, versus the ~20 ppm JWST detection horizon |
+
+---
+
+## Dashboard: Tab 0 — Twin State Monitor
+
+**What it shows:** The live state of the digital twin — the most recently written `twin_state.json`, refreshed every 30 seconds.
+
+**Left column — Biosphere health gauge:**
+A large circular metric showing the current `population_factor` (0.0 = extinct, 1.0 = healthy). Below it, three sub-metrics: cumulative UV dose received, biotic CO VMR (suppressed by the biosphere), and biogenic CH₄ production rate. A colour-coded status label (green/yellow/red) indicates whether the biosphere is thriving, stressed, or critically depleted.
+
+**Centre column — Atmospheric VMR state:**
+A horizontal bar chart showing the current VMR of each tracked species in Atmosphere A, compared against the Stage 1 initial values. Red bars indicate depletion from flare photochemistry; blue bars indicate enhancement. The CO bar visually contrasts the biotic (low) vs. abiotic (high) scenarios.
+
+**Right column — Twin state metadata:**
+Stage that last wrote the state, ISO timestamp, number of flare events logged, number of JWST observations assimilated, and the current posterior weights for each atmosphere scenario. If no `twin_state.json` is found, a warning with instructions to run Stage 1 is displayed instead.
+
+**79-day history time series:**
+If Stage 2 has run, a multi-line plot shows the evolution of O₃, CH₄, and biosphere population_factor over the 79-day observation window, with flare events marked as vertical lines coloured by energy class.
 
 ---
 
@@ -454,6 +624,58 @@ This is the "digital twin feedback loop" panel: as new JWST TRAPPIST-1e data arr
 
 ---
 
+## Dashboard: Tab 7 — Biosphere Engine
+
+**What it shows:** The biosphere model outputs from Stage 2 and Stage 3 — the CO consumption and methanogenesis feedback loops and their spectral consequences.
+
+**Top panel — Biosphere-on vs biosphere-off spectra:**
+Two transmission spectra for Atmosphere A overlaid:
+
+- Orange line: Biosphere-off (abiotic CO ~1×10⁻⁷ VMR, no biogenic CH₄)
+- Green line: Biosphere-on (biotic CO ~3×10⁻⁹ VMR, biogenic CH₄ enhanced)
+- Shaded difference: The biological signal — the region between the two spectra that JWST would need to detect to distinguish life from no life
+
+Key band annotations: CO 4.67 µm, CH₄ 3.3 µm, CO₂ 4.3 µm.
+
+**Middle panel — CO suppression history:**
+If `biosphere_state.csv` from Stage 2 is available, a line plot shows the biotic CO VMR over the 79-day window alongside the abiotic baseline. The gap between the two lines represents the biological CO drawdown at each point in time, which narrows temporarily after large UV flares that stress the biosphere.
+
+**Bottom panel — Detection horizon:**
+A bar chart showing how many JWST transits of TRAPPIST-1e would be needed to detect each key biosignature feature at 5-sigma confidence, computed by `compute_detection_horizon()` in `twin_core.py`. For each species the two bars compare current (post-79-day) amplitude versus the required amplitude. The CO biosphere suppression signal requires ~100 transits; O₃ at 9.6 µm requires ~120 transits with the 3D model caveat.
+
+**Right panel — Biosphere stress event log:**
+A table of all flares with EF_NUV > 100 that caused measurable biosphere stress, showing UV dose, population_factor before/after, and recovery timeline.
+
+---
+
+## Dashboard: Tab 8 — Forward Prediction
+
+**What it shows:** A Monte Carlo projection of where the twin's atmosphere and biosphere will be in the future, given continued stellar flaring at the observed rate.
+
+**Controls (within-tab):**
+
+- Prediction horizon slider: 1 month to 10 years
+- Flare rate multiplier: scale the Vida+2017 rate (0.1× to 3×) to explore optimistic/pessimistic scenarios
+- Number of Monte Carlo runs: 10 to 500 (more = smoother uncertainty bands, slower)
+
+**Main prediction panel:**
+Four sub-panels showing ensemble mean ± 1σ over the prediction horizon for:
+
+1. O₃ VMR (with 1D prediction band and the Ridgway+2023 3D alternative shown as a dashed upper bound)
+2. CH₄ VMR (biotic vs. abiotic trajectories)
+3. Biosphere population_factor (showing survival probability vs. time)
+4. Biotic CO VMR (key spectral indicator)
+
+Each sub-panel also marks the JWST 5-sigma detection threshold as a horizontal reference line so you can see whether the ensemble crosses into detectable territory.
+
+**Right panel — Scenario comparison:**
+Two frozen scenarios can be locked (e.g., "high flare rate" vs. "low flare rate") and their O₃ trajectories overlaid for comparison. A summary table shows the 1-year and 5-year predicted atmospheric state for each scenario, with the posterior-weighted most-likely scenario highlighted.
+
+**Bayesian posterior display:**
+If JWST observations have been assimilated via the sidebar uploader, the posterior weights for each atmosphere scenario are shown as a bar chart. As more observations are added, the posterior narrows toward the most consistent scenario — this is the twin's state-estimation loop in action.
+
+---
+
 ## Key Scientific Caveats
 
 All results carry important model-dependent uncertainties:
@@ -475,9 +697,11 @@ All results carry important model-dependent uncertainties:
 ```
 NAKA-Biosignature-Detection/
 ├── main.py                          Stage 1: Data ingestion
-├── stage2_atmospheric_response.py   Stage 2: Photochemistry
-├── stage3_spectral_generation.py    Stage 3: Spectra
-├── stage4_dashboard.py              Stage 4: Calibration + dashboard
+├── stage2_atmospheric_response.py   Stage 2: Photochemistry + biosphere
+├── stage3_spectral_generation.py    Stage 3: Spectra + biosphere-on/off
+├── stage4_dashboard.py              Stage 4: Calibration + digital twin dashboard
+├── twin_core.py                     Shared: digital twin state engine (all stages import this)
+├── twin_state.json                  Live twin state (written by S1, updated by S2; read by S3/S4)
 │
 ├── Stage 1 Files/
 │   ├── trappist1_tess_lightcurve.csv
@@ -491,12 +715,16 @@ NAKA-Biosignature-Detection/
 │   ├── flare_uv_enhancement.csv
 │   ├── photochem_response_atm_a/b/c.csv
 │   ├── cumulative_biosignature_state.csv
-│   └── vulcan_analog_timeseries.csv
+│   ├── vulcan_analog_timeseries.csv
+│   └── biosphere_state.csv          Per-flare: population_factor, UV dose, biotic CO, biogenic CH4
 │
 ├── Stage 3 Files/
-│   ├── spectrum_A_quiescent.csv (+ 6 more)
+│   ├── spectrum_A_quiescent.csv (+ 6 more individual spectra)
 │   ├── all_spectra_combined.csv
 │   ├── feature_amplitudes.csv
+│   ├── spectrum_atmA_biosphere_on.csv   Living-world spectrum (suppressed CO, biogenic CH4)
+│   ├── spectrum_atmA_biosphere_off.csv  Abiotic baseline spectrum (full CO, no biogenic CH4)
+│   ├── biosphere_spectral_diff.csv      Difference = pure biological signal
 │   └── stage3_spectra_plot.png
 │
 └── Stage 4 Files/

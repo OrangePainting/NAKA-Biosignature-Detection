@@ -290,3 +290,18 @@ if __name__ == "__main__":
 
   -> Ready for Stage 2: Atmospheric Modeling
 """)
+
+    # ── Digital Twin: initialize persistent state ────────────────────────
+    print("=" * 65)
+    print("Initializing Digital Twin State")
+    print("=" * 65)
+    try:
+        from twin_core import initialize_twin_state
+        flare_rows = cat.to_dict(orient='records')
+        twin_state = initialize_twin_state(flare_rows)
+        print(f"  twin_state.json created — {len(flare_rows)} flares logged")
+        print(f"  Biosphere: active, population_factor = 1.0 (healthy)")
+        print(f"  Atmospheric VMRs seeded for Atm A, B, C")
+        print(f"  -> Ready for Stage 2 to evolve the twin state")
+    except Exception as e:
+        print(f"  [Warning] Could not initialize twin state: {e}")

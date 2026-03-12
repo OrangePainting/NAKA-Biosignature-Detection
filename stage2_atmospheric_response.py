@@ -115,6 +115,7 @@ def define_atmospheric_compositions():
             CH4 = 1.80e-6,          # 1.8 ppm (biogenic)
             O3  = 3.00e-7,          # 300 ppb (stratospheric column)
             N2O = 3.20e-7,          # 320 ppb (biogenic)
+            CO  = 1.00e-7,          # 100 ppb (M-dwarf abiotic baseline; Eager-Nash+2024, 5-10x Earth)
             H2O = 1.00e-2,          # 1% (troposphere)
             NO2 = 5.00e-10,         # 0.5 ppb
             HNO3= 3.00e-10,         # 0.3 ppb
@@ -687,6 +688,178 @@ def run_vulcan_analog(flare_row, uv_df_row):
 
 
 # ===========================================================================
+# SECTION 6: Biosphere Model & Digital Twin State Update (Eager-Nash+2024)
+# ===========================================================================
+def run_biosphere_model(resp_df_A, uv_df, atm_A):
+    """
+    Apply Eager-Nash et al. 2024 biosphere feedback to Atmosphere A.
+
+    Two coupled feedback loops:
+      1. CO consumption: 4CO + 2H2O -> 2CO2 + CH3COOH
+         Biosphere acts as CO sink, reducing abiotic CO by ~97% when healthy.
+         CO is the dominant abiotic spectral feature on M-dwarf planets.
+      2. CH4 production: 4H2 + CO2 -> 2H2O + CH4 (methanogenesis)
+         Biosphere replenishes CH4 depleted by UV-driven OH oxidation.
+
+    Stress model: each high-UV flare (EF_NUV > 100) degrades population.
+    Population decays as: pf *= exp(-UV_dose / stress_scale)
+    Recovery between events: pf increases toward 1.0 with tau=730 days.
+
+    Returns
+    -------
+    biosphere_df : DataFrame with per-flare biosphere state
+      columns: time_days, ef_nuv, uv_dose, population_factor,
+               co_vmr_abiotic, co_vmr_biotic, ch4_biogenic_vmr
+    """
+    import copy
+
+    BIO_CO_CONSUMPTION   = 0.97      # fraction consumed by healthy biosphere
+    BIO_CH4_RATE_VMR_DAY = 2.0e-11   # biogenic CH4 VMR added per day
+    BIO_UV_STRESS_SCALE  = 5.0e9     # erg/cm^2 — population half-life dose
+    BIO_RECOVERY_TAU     = 730.0     # days — biosphere recovery timescale
+    F_NUV_QUIESCENT      = MEGA['F_NUV']
+
+    population_factor = 1.0
+    cumul_uv_dose     = 0.0
+    prev_time         = 0.0
+
+    # Base abiotic CO VMR (from LUT CO production in resp_df_A)
+    co_abiotic_base = atm_A['vmr'].get('CO', 1.0e-7)
+
+    records = []
+    for _, row in resp_df_A.sort_values('time_days').iterrows():
+        dt       = row['time_days'] - prev_time
+        ef_nuv   = float(row.get('EF_NUV_peak', 1.0))
+        dur_sec  = float(row.get('duration_sec',
+                         uv_df[uv_df['time_days'] == row['time_days']]['duration_sec'].iloc[0]
+                         if len(uv_df[uv_df['time_days'] == row['time_days']]) > 0 else 600.0))
+
+        # Recovery between flares
+        if dt > 0:
+            population_factor = 1.0 - (1.0 - population_factor) * np.exp(-dt / BIO_RECOVERY_TAU)
+
+        # UV dose from this flare
+        dose = max(0.0, ef_nuv - 1.0) * F_NUV_QUIESCENT * dur_sec
+        cumul_uv_dose += dose
+
+        # Stress response
+        if dose > 0:
+            population_factor *= float(np.exp(-dose / BIO_UV_STRESS_SCALE))
+        population_factor = float(np.clip(population_factor, 0.0, 1.0))
+
+        # Compute biotic CO (biosphere consumes abiotic CO)
+        co_abiotic = co_abiotic_base * (1.0 + row.get('dCO', 0.0))
+        co_biotic  = co_abiotic * (1.0 - BIO_CO_CONSUMPTION * population_factor)
+        co_biotic  = max(co_biotic, co_abiotic * 0.001)
+
+        # Compute biogenic CH4 produced since last flare
+        ch4_biogenic = BIO_CH4_RATE_VMR_DAY * population_factor * dt
+
+        records.append(dict(
+            time_days          = row['time_days'],
+            ef_nuv             = ef_nuv,
+            uv_dose_erg_cm2    = dose,
+            cumul_uv_dose      = cumul_uv_dose,
+            population_factor  = population_factor,
+            co_vmr_abiotic     = co_abiotic,
+            co_vmr_biotic      = co_biotic,
+            ch4_biogenic_vmr   = ch4_biogenic,
+        ))
+        prev_time = row['time_days']
+
+    biosphere_df = pd.DataFrame(records)
+    biosphere_df.to_csv(f"{OUTPUT_DIR}/biosphere_state.csv", index=False)
+
+    final = biosphere_df.iloc[-1] if len(biosphere_df) > 0 else {}
+    print(f"  Biosphere final population factor : {final.get('population_factor', 1.0):.4f}")
+    print(f"  Biogenic CH4 cumulative (VMR)     : {biosphere_df['ch4_biogenic_vmr'].sum():.2e}")
+    print(f"  CO (abiotic)                      : {final.get('co_vmr_abiotic', 0):.2e}")
+    print(f"  CO (biotic, with consumption)     : {final.get('co_vmr_biotic', 0):.2e}")
+
+    return biosphere_df
+
+
+def update_twin_state(resp_dfs, cumul_df, biosphere_df, uv_df):
+    """
+    Load twin_state.json, update it with Stage 2 results, and save.
+
+    Updates:
+      state['atmosphere'] — final VMRs after 79-day flare sequence
+      state['cumulative_changes'] — fractional changes per atmosphere
+      state['biosphere'] — population factor, CO suppression, CH4 production
+      state['history'] — per-day state time series for the timeline plot
+    """
+    from datetime import datetime, timezone
+    try:
+        from twin_core import (load_twin_state, save_twin_state,
+                               update_biosphere_stress, biosphere_recovery)
+    except ImportError:
+        print("  [Warning] twin_core not found — skipping state update")
+        return
+
+    state = load_twin_state()
+
+    # Update cumulative changes for each atmosphere
+    for _, row in cumul_df.iterrows():
+        lbl  = row['atmosphere']
+        changes = {}
+        for col in cumul_df.columns:
+            if col.startswith('cumul_d'):
+                val = row[col]
+                if pd.notna(val) and np.isfinite(float(val)):
+                    sp = col.replace('cumul_d', '')
+                    changes[sp] = float(val)
+        state['cumulative_changes'][lbl] = changes
+
+        # Apply cumulative changes to living atmosphere state
+        for sp, frac in changes.items():
+            if sp in state['atmosphere'].get(lbl, {}):
+                old = state['atmosphere'][lbl][sp]
+                state['atmosphere'][lbl][sp] = float(
+                    np.clip(old * (1.0 + frac), 0.0, 1.0))
+
+    # Update biosphere from biosphere_df
+    if len(biosphere_df) > 0:
+        final_bio = biosphere_df.iloc[-1]
+        bio = state['biosphere']
+        bio['population_factor']    = float(final_bio['population_factor'])
+        bio['cumulative_uv_dose']   = float(final_bio['cumul_uv_dose'])
+        bio['co_vmr_abiotic']       = float(final_bio['co_vmr_abiotic'])
+        bio['co_vmr_biotic']        = float(final_bio['co_vmr_biotic'])
+        bio['ch4_production_rate']  = float(final_bio['population_factor'])
+        bio['active']               = final_bio['population_factor'] > 0.01
+        # Update Atm A's CO VMR with biotic value
+        state['atmosphere']['A']['CO'] = float(final_bio['co_vmr_biotic'])
+        # Add cumulative biogenic CH4
+        ch4_boost = float(biosphere_df['ch4_biogenic_vmr'].sum())
+        old_ch4 = state['atmosphere']['A'].get('CH4', 1.8e-6)
+        state['atmosphere']['A']['CH4'] = float(np.clip(old_ch4 + ch4_boost, 0.0, 1.0))
+
+    # Build history time series for the Twin State Monitor
+    history = []
+    for _, row in biosphere_df.iterrows():
+        history.append({
+            'day':                 float(row['time_days']),
+            'O3':                  float(state['atmosphere']['A'].get('O3', 3e-7)),
+            'CH4':                 float(state['atmosphere']['A'].get('CH4', 1.8e-6)),
+            'CO':                  float(row['co_vmr_biotic']),
+            'N2O':                 float(state['atmosphere']['A'].get('N2O', 3.2e-7)),
+            'population_factor':   float(row['population_factor']),
+            'uv_dose':             float(row['uv_dose_erg_cm2']),
+        })
+    state['history'] = history
+
+    # Update metadata
+    state['meta']['last_updated_utc'] = datetime.now(timezone.utc).isoformat()
+    state['meta']['last_updated_by']  = 'stage2'
+
+    save_twin_state(state)
+    pf = state['biosphere']['population_factor']
+    print(f"  twin_state.json updated (biosphere pf={pf:.3f}, "
+          f"{len(history)} history points)")
+
+
+# ===========================================================================
 # SECTION 6: Diagnostic Plots
 # ===========================================================================
 def plot_main(atms, uv_df, resp_dfs, cumul_df, cat):
@@ -1101,6 +1274,13 @@ if __name__ == "__main__":
           f"(class: {flare_row['class']})")
 
     ts_df, meta = run_vulcan_analog(flare_row, uv_row)
+
+    print("\n" + "="*65)
+    print("SECTION 6: Biosphere Model (Eager-Nash+2024) & Twin State")
+    print("="*65)
+    resp_A = resp_dfs['A']
+    biosphere_df = run_biosphere_model(resp_A, uv_df, atms['A'])
+    update_twin_state(resp_dfs, cumul_df, biosphere_df, uv_df)
 
     # ── Section 6: Plots ──────────────────────────────────────────────────
     print("\n" + "="*65)
