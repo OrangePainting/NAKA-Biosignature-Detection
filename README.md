@@ -1,4 +1,5 @@
 <h1 align="center"> NAKA Biosignature Detection — TRAPPIST-1e Digital Twin
+
 <img width="400"  alt="image" src="https://github.com/user-attachments/assets/e5c58ba4-a620-4ed8-9988-6fecbdea0ba5" /> <img width="400" alt="image" src="https://github.com/user-attachments/assets/4a854973-522a-4acf-8115-9053911ff09d" />
 
 ## Table of Contents:
